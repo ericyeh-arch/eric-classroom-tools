@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>座標獵人</title>
+<style>
+  :root { --bg:#111; --fg:#f2f2f2; --accent:#ff8a1f; --dim:#666; }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; min-height:100vh; background:var(--bg); color:var(--fg);
+    font-family: "Kalam","Comic Sans MS","Microsoft JhengHei",sans-serif;
+    display:flex; flex-direction:column; align-items:center; padding:16px;
+  }
+  h1 { color:var(--accent); margin:4px 0 8px; letter-spacing:4px; }
+  .hud { display:flex; gap:24px; font-size:1.3rem; margin-bottom:8px; }
+  .hud b { color:var(--accent); }
+  .hud .low { color:#ff4d4d; }
+  svg { width:min(92vw,520px); height:auto; background:#161616; border:3px solid var(--fg); border-radius:6px; }
+  .grid { stroke:#3a3a3a; stroke-width:1; }
+  .axis { stroke:var(--fg); stroke-width:2; }
+  .lbl { fill:#aaa; font-size:12px; text-anchor:middle; }
+  .hit { fill:var(--accent); }
+  .miss { stroke:var(--dim); stroke-width:2; }
+  .reveal { fill:none; stroke:var(--accent); stroke-width:2; stroke-dasharray:3 3; }
+  form { display:flex; gap:8px; margin:12px 0 4px; }
+  input {
+    font:inherit; font-size:1.3rem; width:180px; padding:6px 10px;
+    background:transparent; color:var(--fg); border:2px solid var(--fg); border-radius:6px;
+  }
+  input:focus { outline:none; border-color:var(--accent); }
+  button {
+    font:inherit; font-size:1.1rem; padding:6px 16px; cursor:pointer;
+    background:var(--accent); color:#111; border:none; border-radius:6px; font-weight:bold;
+  }
+  button.ghost { background:transparent; color:var(--fg); border:2px solid var(--fg); }
+  #msg { min-height:1.6em; margin:4px 0; font-size:1.1rem; }
+  #end { display:none; text-align:center; margin-top:8px; }
+  #end .score { font-size:2rem; color:var(--accent); }
+</style>
+</head>
+<body>
+  <h1>座標獵人</h1>
+  <div class="hud">
+    <div>時間 <b id="time">60</b></div>
+    <div>得分 <b id="score">0</b> / 10</div>
+  </div>
+
+  <svg id="board" viewBox="0 0 440 440" aria-label="11×11 座標棋盤"></svg>
+
+  <form id="form" autocomplete="off">
+    <input id="guess" placeholder="例：2,-3" inputmode="text" aria-label="輸入座標">
+    <button type="submit">猜！</button>
+  </form>
+  <div id="msg">找出 10 個隱藏座標（x、y 從 -5 到 5）</div>
+
+  <div id="end">
+    <div>時間到／全部找到！</div>
+    <div class="score">得分 <span id="final">0</span> / 10</div>
+  </div>
+  <button class="ghost" id="restart" type="button">重新開始</button>
+
+<script>
+(() => {
+  const N = 5, CELL = 40, PAD = 20, TOTAL = 10, SECONDS = 60;
+  const NS = "http://www.w3.org/2000/svg";
+  const board = document.getElementById("board");
+  const $ = id => document.getElementById(id);
+  const px = v => PAD + (v + N) * CELL;
+  const py = v => PAD + (N - v) * CELL;
+
+  let targets, guessed, score, left, timer, playing;
+
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    (parent || board).appendChild(e);
+    return e;
+  }
+
+  function drawBoard() {
+    board.innerHTML = "";
+    for (let i = -N; i <= N; i++) {
+      el("line", { class: i === 0 ? "axis" : "grid", x1: px(i), y1: py(-N), x2: px(i), y2: py(N) });
+      el("line", { class: i === 0 ? "axis" : "grid", x1: px(-N), y1: py(i), x2: px(N), y2: py(i) });
+      if (i !== 0) {
+        el("text", { class: "lbl", x: px(i), y: py(0) + 14 }).textContent = i;
+        el("text", { class: "lbl", x: px(0) - 10, y: py(i) + 4 }).textContent = i;
+      }
+    }
+  }
+
+  function key(x, y) { return x + "," + y; }
+
+  function pickTargets() {
+    const all = [];
+    for (let x = -N; x <= N; x++) for (let y = -N; y <= N; y++) all.push([x, y]);
+    for (let i = all.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [all[i], all[j]] = [all[j], all[i]];
+    }
+    return new Set(all.slice(0, TOTAL).map(p => key(p[0], p[1])));
+  }
+
+  function say(text, color) { const m = $("msg"); m.textContent = text; m.style.color = color || ""; }
+
+  function parse(s) {
+    const nums = s.replace(/[，、]/g, ",").replace(/[－−]/g, "-").match(/-?\d+/g);
+    if (!nums || nums.length !== 2) return null;
+    const x = +nums[0], y = +nums[1];
+    if (Math.abs(x) > N || Math.abs(y) > N) return null;
+    return [x, y];
+  }
+
+  function updateHud() {
+    $("score").textContent = score;
+    $("time").textContent = left;
+    $("time").className = left <= 10 ? "low" : "";
+  }
+
+  function finish() {
+    playing = false;
+    clearInterval(timer);
+    targets.forEach(k => {
+      if (!guessed.has(k)) {
+        const [x, y] = k.split(",").map(Number);
+        el("circle", { class: "reveal", cx: px(x), cy: py(y), r: 9 });
+      }
+    });
+    $("final").textContent = score;
+    $("end").style.display = "block";
+    $("guess").disabled = true;
+    say(score === TOTAL ? "太強了，全部找到！" : "虛線圈是沒找到的座標", "");
+  }
+
+  function start() {
+    targets = pickTargets();
+    guessed = new Set();
+    score = 0; left = SECONDS; playing = true;
+    drawBoard(); updateHud();
+    $("end").style.display = "none";
+    $("guess").disabled = false; $("guess").value = ""; $("guess").focus();
+    say("找出 10 個隱藏座標（x、y 從 -5 到 5）");
+    clearInterval(timer);
+    timer = setInterval(() => { left--; updateHud(); if (left <= 0) finish(); }, 1000);
+  }
+
+  $("form").addEventListener("submit", e => {
+    e.preventDefault();
+    if (!playing) return;
+    const p = parse($("guess").value);
+    $("guess").value = "";
+    if (!p) return say("格式不對，請輸入像 2,-3（範圍 -5 到 5）", "#ff4d4d");
+    const k = key(p[0], p[1]);
+    if (guessed.has(k)) return say("這格猜過了", "#aaa");
+    guessed.add(k);
+    if (targets.has(k)) {
+      score++;
+      el("circle", { class: "hit", cx: px(p[0]), cy: py(p[1]), r: 9 });
+      say("命中 (" + k + ")！", "var(--accent)");
+      updateHud();
+      if (score === TOTAL) finish();
+    } else {
+      const c = 6, cx = px(p[0]), cy = py(p[1]);
+      el("line", { class: "miss", x1: cx - c, y1: cy - c, x2: cx + c, y2: cy + c });
+      el("line", { class: "miss", x1: cx - c, y1: cy + c, x2: cx + c, y2: cy - c });
+      say("沒中 (" + k + ")", "#aaa");
+    }
+  });
+
+  $("restart").addEventListener("click", start);
+  start();
+})();
+</script>
+</body>
+</html>
